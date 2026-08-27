@@ -187,6 +187,8 @@ test("isGitRepo: 向上查找", () => {
 test("gitWorkDir / gitNeedsRepo", () => {
   assert.equal(gitWorkDir("git status"), null);
   assert.equal(gitWorkDir("git -C D:/repo status")?.replace(/\\/g, "/"), "D:/repo");
+  assert.equal(gitWorkDir('git -C "D:/repo" status')?.replace(/\\/g, "/"), "D:/repo"); // 带引号也解析
+  assert.equal(gitWorkDir("git -C 'D:/repo' status")?.replace(/\\/g, "/"), "D:/repo");
   assert.equal(gitNeedsRepo("git clone https://x"), false);
   assert.equal(gitNeedsRepo("git init"), false);
   assert.equal(gitNeedsRepo("git status"), true);

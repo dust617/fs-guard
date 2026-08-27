@@ -347,7 +347,10 @@ export function isGitRepo(dir: string): string | null {
 export function gitWorkDir(cmd: string): string | null {
   const m = /^\s*git(\s+-C\s+([^\s;|&]+))?/.exec(cmd);
   if (!m) return null;
-  return m[2] ? resolve(m[2]) : null;
+  const raw = m[2];
+  if (!raw) return null;
+  const clean = raw.replace(/^(["'])(.*)\1$/, "$2"); // 剥离路径外引号
+  return resolve(clean);
 }
 
 /** git 命令中无需仓库上下文的子命令（clone/init/config --global/--version 等）。注意 -C 不算豁免，它只是指定另一目录，仍需要仓库检查。 */
