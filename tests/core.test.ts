@@ -83,6 +83,10 @@ test("rewrite: 已带 -X 不再注入", () => {
   assert.equal(rewritePythonCommand("python -X dev a.py"), "python -X dev a.py");
 });
 
+test("rewrite: python3.12 也注入", () => {
+  assert.equal(rewritePythonCommand("python3.12 script.py"), "python3.12 -X utf8 script.py");
+});
+
 test("rewrite: 非 python 命令不动", () => {
   assert.equal(rewritePythonCommand("echo hello | python -c 'x'"), "echo hello | python -c 'x'");
   assert.equal(rewritePythonCommand("npm run build"), "npm run build");
@@ -118,6 +122,19 @@ test("destructive: 安全命令不命中", () => {
   assert.equal(detectDestructive("npm run build"), null);
   assert.equal(detectDestructive("git status"), null);
   assert.equal(detectDestructive("git clean -n"), null); // dry-run 放行
+});
+
+test("destructive: echo 文本里的 rm -rf 不误拦", () => {
+  assert.equal(detectDestructive("echo 'rm -rf 只是文本'"), null);
+  assert.equal(detectDestructive("grep -r 'rm -rf' docs/"), null);
+  assert.equal(detectDestructive("cat file | grep rm -rf"), null);
+  assert.equal(detectDestructive("node -e 'ls; rm -rf x'"), null); // 引号内不是真实命令
+});
+
+test("destructive: 分隔符后的 rm -rf 拦截", () => {
+  assert.ok(detectDestructive("cd /tmp && rm -rf x"));
+  assert.ok(detectDestructive("ls; rm -rf x"));
+  assert.ok(detectDestructive("find . -exec rm -rf {} ;"));
 });
 
 test("destructive: #fsguard-allow 放行", () => {
@@ -173,6 +190,7 @@ test("gitWorkDir / gitNeedsRepo", () => {
   assert.equal(gitNeedsRepo("git clone https://x"), false);
   assert.equal(gitNeedsRepo("git init"), false);
   assert.equal(gitNeedsRepo("git status"), true);
+  assert.equal(gitNeedsRepo("git -C D:/repo status"), true); // -C 不是豁免
 });
 
 /* ---------------- looksLikeRealError ---------------- */
@@ -181,6 +199,8 @@ test("looksLikeRealError: 真错误/文档排除", () => {
   assert.ok(looksLikeRealError("ENOENT: no such file or directory, access 'x'"));
   assert.ok(looksLikeRealError("Error: cannot find module 'ws'"));
   assert.ok(looksLikeRealError("fatal: not a git repository"));
+  assert.ok(looksLikeRealError("ls: cannot access '/x': No such file or directory"));
+  assert.ok(looksLikeRealError("cat: No such file or directory"));
   assert.ok(!looksLikeRealError("# 调研文档 讨论 error 场景"));
   assert.ok(!looksLikeRealError("plain success output"));
   assert.ok(!looksLikeRealError("---\n# heading\ncontent about errors"));

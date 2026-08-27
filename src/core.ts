@@ -10,12 +10,13 @@ import {
   closeSync,
   existsSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   readSync,
   statSync,
 } from "node:fs";
-import { basename, dirname, extname, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 
 /* ------------------------------------------------------------------ */
 /* 错误分类                                                             */
@@ -232,7 +233,7 @@ export function probeEncoding(buf: Buffer): string {
  * 绝不因 guard 失败而影响正常工具流程。
  */
 export function analyzePath(cwd: string, p: string): PathInfo {
-  const abs = resolve(cwd, p);
+  const abs = resolveHome(cwd, p);
   const base: PathInfo = {
     path: abs.replace(/\\/g, "/"),
     exists: false,
@@ -274,9 +275,16 @@ export function analyzePath(cwd: string, p: string): PathInfo {
   return base;
 }
 
+/** 展开用户主目录（~ / ~\\user），其余与 path.resolve 一致。 */
+export function resolveHome(cwd: string, p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2));
+  return resolve(cwd, p);
+}
+
 /** 读取父目录，返回与目标最相似的候选文件名（供“文件不存在”时提示）。 */
 export function buildSuggestion(cwd: string, needle: string, limit = 5): string[] {
-  let dir = dirname(resolve(cwd, needle));
+  let dir = dirname(resolveHome(cwd, needle));
   const base = basename(needle).toLowerCase();
   let entries: string[] = [];
   try {
@@ -309,9 +317,9 @@ export function buildSuggestion(cwd: string, needle: string, limit = 5): string[
 /* 命令改写 / 仓库边界 / 破坏性命令                                      */
 /* ------------------------------------------------------------------ */
 
-/** 仅当命令以解释器开头且未带 -X 时，插入 -X utf8（消灭 GBK stdout 错误）。 */
+/** 仅当命令以解释器开头且未带 -X 时，插入 -X utf8（消灭 GBK stdout 错误）。支持 py/python/python3.x。 */
 export function rewritePythonCommand(cmd: string): string {
-  const m = /^(\s*)(py|python|python3)(\s+|$)/.exec(cmd);
+  const m = /^(\s*)(py|python\d{0,2}(\.\d{1,2})?)(\s+|$)/.exec(cmd);
   if (!m) return cmd;
   if (/(?:^|\s)-X\b/.test(cmd)) return cmd;
   const rest = cmd.slice(m[0].length);
@@ -320,7 +328,7 @@ export function rewritePythonCommand(cmd: string): string {
 
 /** 判断命令是否以 python 解释器开头。 */
 export function isPythonCommand(cmd: string): boolean {
-  return /^(\s*)(py|python|python3)(\s+|$)/.test(cmd);
+  return /^(\s*)(py|python\d{0,2}(\.\d{1,2})?)(\s+|$)/.test(cmd);
 }
 
 /** 从 dir 向上查找 .git，返回仓库根目录；找不到返回 null。 */
@@ -342,9 +350,9 @@ export function gitWorkDir(cmd: string): string | null {
   return m[2] ? resolve(m[2]) : null;
 }
 
-/** git 命令中无需仓库上下文的子命令（clone/init/config --global/--version 等）。 */
+/** git 命令中无需仓库上下文的子命令（clone/init/config --global/--version 等）。注意 -C 不算豁免，它只是指定另一目录，仍需要仓库检查。 */
 export function gitNeedsRepo(cmd: string): boolean {
-  if (/^\s*git\s+(clone|init|config\s+--global|--version|-C)\b/.test(cmd)) return false;
+  if (/^\s*git\s+(clone|init|config\s+--global|--version)\b/.test(cmd)) return false;
   return true;
 }
 
@@ -353,25 +361,29 @@ export interface DestructiveMatch {
   detail: string;
 }
 
-/** 破坏性命令检测。命令中含 #fsguard-allow 时返回 null（显式放行）。 */
+/** 破坏性命令检测。命令中含 #fsguard-allow 时返回 null（显式放行）。
+ * 为避免误拦（如 echo 输出文本里提到 rm -rf），命令词必须位于行首或分隔符（;|&）后。 */
 export function detectDestructive(cmd: string): DestructiveMatch | null {
   if (cmd.includes("#fsguard-allow")) return null;
+  const plain = cmd.replace(/["'`][^"'`\n]*["'`]/g, " "); // 剥离引号区域，避免 echo/node -e 内文本误拦
+  const atCmd = "(?:^|[;|&]\\s*)";
   const rules: Array<{ pattern: string; re: RegExp }> = [
-    { pattern: "rm -rf", re: /\brm\b[^;\n|&]*\s-[a-z]*r[a-z]*f\b/i },
-    { pattern: "rm -fr", re: /\brm\b[^;\n|&]*\s-[a-z]*f[a-z]*r\b/i },
-    { pattern: "del /s", re: /\bdel\b[^;\n|&]*\/s\b/i },
-    { pattern: "rmdir/rd /s", re: /\b(?:rmdir|rd)\b[^;\n|&]*\/s\b/i },
-    { pattern: "Remove-Item -Recurse/-Force", re: /\bRemove-Item\b[^;\n|&]*-(?:Recurse|Force)\b/i },
-    { pattern: "rm -Recurse", re: /\brm\b[^;\n|&]*-(?:Recurse|Force)\b/i },
+    { pattern: "rm -rf", re: new RegExp(atCmd + "rm\\b[^;|&]*\\s-[a-z]*r[a-z]*f\\b", "i") },
+    { pattern: "rm -fr", re: new RegExp(atCmd + "rm\\b[^;|&]*\\s-[a-z]*f[a-z]*r\\b", "i") },
+    { pattern: "del /s", re: new RegExp(atCmd + "del\\b[^;|&]*\\/s\\b", "i") },
+    { pattern: "rmdir/rd /s", re: new RegExp(atCmd + "(?:rmdir|rd)\\b[^;|&]*\\/s\\b", "i") },
+    { pattern: "Remove-Item -Recurse/-Force", re: new RegExp(atCmd + "Remove-Item\\b[^;|&]*-(?:Recurse|Force)\\b", "i") },
+    { pattern: "rm -Recurse", re: new RegExp(atCmd + "rm\\b[^;|&]*-(?:Recurse|Force)\\b", "i") },
+    { pattern: "find -exec rm", re: /\bfind\b[^;|&]*(?:^|\s)-exec\b[^;|&]*\brm\b/i },
     { pattern: "format", re: /\bformat\b\s+[a-zA-Z]:/i },
-    { pattern: "taskkill /f", re: /\btaskkill\b[^;\n|&]*\/f\b/i },
-    { pattern: "git clean -f", re: /\bgit\s+clean\s+-[a-z]*f/i },
-    { pattern: "git reset --hard", re: /\bgit\s+reset\s+--hard\b/ },
-    { pattern: "Windows 设备名删除", re: /\b(?:del|rm|remove)\b[^;\n|&]*\b(nul|con|prn|aux)\b/i },
-    { pattern: "磁盘/分区工具", re: /\b(?:diskpart|mkfs\.\w+|dd\b[^;\n|&]*\bof=)/i },
+    { pattern: "taskkill /f", re: new RegExp(atCmd + "taskkill\\b[^;|&]*\\/f\\b", "i") },
+    { pattern: "git clean -f", re: new RegExp(atCmd + "git\\s+clean\\s+-[a-z]*f", "i") },
+    { pattern: "git reset --hard", re: new RegExp(atCmd + "git\\s+reset\\s+--hard\\b") },
+    { pattern: "Windows 设备名删除", re: new RegExp(atCmd + "(?:del|rm|remove)\\b[^;|&]*\\b(nul|con|prn|aux)\\b", "i") },
+    { pattern: "磁盘/分区工具", re: /\b(?:diskpart|mkfs\.\w+|dd\b[^;|&]*\bof=)/i },
   ];
   for (const r of rules) {
-    if (r.re.test(cmd)) {
+    if (r.re.test(plain)) {
       return { pattern: r.pattern, detail: cmd.slice(0, 120) };
     }
   }
@@ -379,7 +391,12 @@ export function detectDestructive(cmd: string): DestructiveMatch | null {
 }
 
 /** 结果文本是否“看起来像真实错误”（严格：开头即错误特征，排除文档/数据误报）。 */
-const REAL_ERROR_HEAD = /^(?:\s*)(?:enoent|eacces|ebusy|eperm|einval|enotdir|error|failed|fatal|traceback|exception|permissionerror|filenotfounderror|timeouterror|path not found|错误[:\s]|无法|失败|zsh:|bash:|command not found|未找到命令|不是内部或外部命令|npm err|npm error|mcp error|node:internal|internal\/modules|cannot find module|invalid|denied|timeout|too (?:long|large)|argument list too long|\(\s*exit code)/i;
+const CMD_PREFIX = ["ls", "cat", "cp", "mv", "mkdir", "rm", "find", "grep", "sed", "awk", "bash", "node", "npm", "python", "python3", "py", "git", "tar", "unzip", "curl", "wget", "docker", "psql", "npx", "yarn", "pnpm", "tsc", "cmd", "powershell", "reg"];
+const REAL_ERROR_HEAD = new RegExp(
+  "^(?:\\s*)(?:" + CMD_PREFIX.join("|") + "):\\s*(?:cannot|cannot|No such|not (?:found|a|recognized)|is not|denied|无效|不是|找不到|拒绝)|" +
+    "^(?:\\s*)(?:enoent|eacces|ebusy|eperm|einval|enotdir|error|failed|fatal|traceback|exception|permissionerror|filenotfounderror|timeouterror|path not found|错误[:\\s]|无法|失败|zsh:|bash:|command not found|未找到命令|不是内部或外部命令|npm err|npm error|mcp error|node:internal|internal\\/modules|cannot find module|cannot access|access is denied|invalid|denied|timeout|too (?:long|large)|argument list too long|\\(\\s*exit code)",
+  "i",
+);
 export function looksLikeRealError(text: string): boolean {
   const head = (text || "").slice(0, 260);
   if (/^(?:\s*)(?:#+|\/\/+|\/\*+|<!--|\{|\||-{3,})/.test(head)) return false; // 文档/数据开头
